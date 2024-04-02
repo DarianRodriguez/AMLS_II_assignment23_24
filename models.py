@@ -11,6 +11,10 @@ from keras.metrics import SparseCategoricalAccuracy
 from keras.models import Model
 from keras.optimizers import Adam
 from keras import layers
+from keras import backend as K
+from keras.callbacks import ReduceLROnPlateau
+from sklearn.utils import compute_class_weight
+
 
 
 from sklearn.metrics import (
@@ -21,6 +25,58 @@ from sklearn.metrics import (
     recall_score,
     accuracy_score
 )
+
+def sparse_categorical_focal_loss(gamma=2.0, from_logits=False, class_weights=None):
+  """
+  Sparse Categorical Focal Loss function with alpha for class weights and gamma.
+
+  Args:
+    gamma: Focusing parameter (float).
+    from_logits: Whether predictions are logits or probabilities (bool).
+    class_weights: List of class weights (length must be 5) (optional).
+
+  Returns:
+    A loss function that can be used during model compilation.
+  """
+
+  def loss(y_true, y_pred):
+
+    epsilon = K.epsilon()
+
+    # Clip prediction values to avoid overflow/underflow
+    y_pred = K.clip(y_pred, epsilon, 1.0-epsilon)
+
+    # Calculate crossentropy loss
+    ce = K.sparse_categorical_crossentropy(y_true, y_pred)
+
+    if not from_logits:
+      # If predictions are probabilities, apply softmax
+      y_pred = K.softmax(y_pred)
+
+    # Calculate modulating factor
+    pt = K.sum(K.cast(y_true, 'float32') * y_pred, axis=-1)
+    focal_factor = K.pow(1 - pt, gamma)
+
+    # Apply class weights (if provided) if not all classes equally important
+    if class_weights:
+      if len(class_weights) != 5:
+        raise ValueError("Class weights must have length 5 for 5 classes!")
+      
+      class_weights_tensor = K.constant(class_weights)
+      # Print shapes for debugging
+      print("Shape of class_weights_tensor:", K.shape(class_weights_tensor))
+      print("Shape of y_true:", K.shape(y_true))
+      print(y_true)
+      print(class_weights_tensor)
+        
+      focal_factor *= class_weights_tensor[y_true]
+
+    # Apply focal loss formula with weighted modulating factor
+    loss = K.mean(focal_factor * ce)
+    return loss
+
+  return loss
+
 
 
 class ModelTrainer:
@@ -36,6 +92,9 @@ class ModelTrainer:
         self.valid_set = dataset['valid'].map(lambda image, label, _: (image, label)).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
         self.train_set = dataset['train'].map(lambda image, label, _: (image, label)).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
         self.test_set = dataset['test'].map(lambda image, label, _: (image, label)).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
+
+        dataset_ytrain = dataset['train'].map(lambda image, label,_: label)
+        self.ytrain =  [label.numpy() for label in dataset_ytrain]
 
         #test_set = dataset['test'].map(lambda image, label, image_name: (image))
         #test_set = dataset['valid'].map(lambda image, label, image_name: (image))
@@ -65,9 +124,30 @@ class ModelTrainer:
         for layer in base_model.layers[-5:]:
             layer.trainable = True
 
+        #loss_fn = sparse_categorical_focal_loss(gamma=2, from_logits=True, class_weights = class_weights_v1)
+
 
         # Define the model
         model = Model(inputs=base_model.input, outputs=outputs)
+
+        # Compile the model
+        #model.compile(optimizer=Adam(),
+        #            loss=SparseCategoricalCrossentropy(),
+        #            metrics=['accuracy'])
+
+        # Use original class distribution as class weights
+        #class_distribution = {3: 0.61, 4: 0.12, 2: 0.11, 1: 0.10, 0: 0.05}
+        #class_weights = {3: 1 / 0.61, 4: 1 / 0.12, 2: 1 / 0.11, 1: 1 / 0.10, 0: 1 / 0.05}
+        class_weights = compute_weights(self.ytrain)
+        print(class_weights)
+
+        # Define the callback
+        reduce_lr = ReduceLROnPlateau(monitor='val_loss', 
+                                    factor=0.1, 
+                                    patience=5, 
+                                    min_lr=0.0001)
+
+        optimizer = Adam(learning_rate=0.01) 
 
         # Compile the model
         model.compile(optimizer=Adam(),
@@ -75,7 +155,7 @@ class ModelTrainer:
                     metrics=['accuracy'])
 
         # Train the model 
-        historic_data = model.fit(self.train_set, validation_data = self.valid_set, **params)
+        historic_data = model.fit(self.train_set, validation_data = self.valid_set,class_weight=class_weights, **params) #callbacks=[reduce_lr]
 
         return historic_data,model
     
@@ -228,3 +308,15 @@ def misclassified_samples(predicted_labels,true_labels,images,filename):
 
     # Explicitly close the figure
     plt.close()
+
+def compute_weights(y_train):
+
+    #y_train = list(dataset['train'].map(lambda image, label, _: (label)))
+    class_weights = compute_class_weight(
+                                            class_weight = "balanced",
+                                            classes = np.unique(y_train),
+                                            y = y_train                                                
+                                        )
+    class_weights = dict(zip(np.unique(y_train), class_weights))
+
+    return class_weights

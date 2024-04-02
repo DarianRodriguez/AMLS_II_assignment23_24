@@ -53,11 +53,11 @@ datasets = {
 # ======================================================================================================================
 # Models Training
 
-trainer = ModelTrainer(batch_size=20, num_classes=5, dataset = datasets, labels = abbrev_labels)
+trainer = ModelTrainer(batch_size=32, num_classes=5, dataset = datasets, labels = abbrev_labels)
 
 # Dictionary containing model fit parameters
 params = {
-    'epochs': 2,
+    'epochs': 20,
     'verbose': 1
 }
 
