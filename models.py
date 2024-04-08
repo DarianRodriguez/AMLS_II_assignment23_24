@@ -4,16 +4,19 @@ import numpy as np
 import seaborn as sns
 import math
 
-from keras.applications import EfficientNetB4,EfficientNetB3
-from keras.layers import GlobalAveragePooling2D, Dense
+from keras.applications import EfficientNetB3
+from keras.layers import GlobalAveragePooling2D, Dense,AveragePooling2D, Flatten
 from keras.losses import SparseCategoricalCrossentropy
 from keras.metrics import SparseCategoricalAccuracy
 from keras.models import Model
 from keras.optimizers import Adam
 from keras import layers
 from keras import backend as K
-from keras.callbacks import ReduceLROnPlateau
+from keras import regularizers
+from keras.callbacks import ReduceLROnPlateau, EarlyStopping,ModelCheckpoint
 from sklearn.utils import compute_class_weight
+import unet
+import cv2
 
 
 
@@ -25,6 +28,16 @@ from sklearn.metrics import (
     recall_score,
     accuracy_score
 )
+
+# Build Unet Model
+unet_model = unet.build_model(512,
+                              channels=3,
+                              num_classes=2,
+                              layer_depth=4,
+                              filters_root=64,
+                              padding="same")
+
+unet_model.load_weights("best_model.h5")
 
 def sparse_categorical_focal_loss(gamma=2.0, from_logits=False, class_weights=None):
   """
@@ -40,6 +53,8 @@ def sparse_categorical_focal_loss(gamma=2.0, from_logits=False, class_weights=No
   """
 
   def loss(y_true, y_pred):
+    """ Focal loss function
+    """
 
     epsilon = K.epsilon()
 
@@ -77,8 +92,27 @@ def sparse_categorical_focal_loss(gamma=2.0, from_logits=False, class_weights=No
 
   return loss
 
+# Define a function to adjust learning rate based on epoch
+def learning_rate_schedule(epoch):
+  """
+  This function reduces the learning rate by a factor of 0.1 every 10 epochs.
+  """
+  initial_lr = 0.001  # Initial learning rate
+  decay = 0.1  # Learning rate decay factor
+  epochs_per_decay = 10  # Number of epochs before decaying learning rate
 
+  learning_rate = initial_lr * (decay**(epoch // epochs_per_decay))
+  return learning_rate
+  
 
+def segment_data(image, label, _):
+    # Apply UNet model and generate mask (outside map)
+    mask = unet_model(tf.expand_dims(image, axis=0)) #tf.expand_dims(image, axis=0)
+    soil_mask = tf.where(tf.transpose(mask[0], (2, 0, 1))[0] <= 0.5, 1, 0)
+    masked_img = image * tf.expand_dims(tf.cast(soil_mask, image.dtype), axis=-1)
+
+    return  masked_img, label
+    
 class ModelTrainer:
 
     def __init__(self, batch_size, labels:dict, dataset, num_classes=5):
@@ -88,20 +122,18 @@ class ModelTrainer:
         self.class_labels_dict = labels 
         self.class_names = list(self.class_labels_dict.values())
 
-        # Reconfigure the datasets to have only image and label
-        self.valid_set = dataset['valid'].map(lambda image, label, _: (image, label)).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
-        self.train_set = dataset['train'].map(lambda image, label, _: (image, label)).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
-        self.test_set = dataset['test'].map(lambda image, label, _: (image, label)).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
-
+        
+        train_dataset = dataset['train'].map(segment_data,num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        valid_dataset = dataset['valid'].map(segment_data,num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        test_dataset = dataset['test'].map(segment_data,num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        
+        # Cache the datasets after applying any operations that limit the dataset size
+        self.train_set  = train_dataset.batch(batch_size) #.cache()
+        self.valid_set = valid_dataset.batch(batch_size) #.cache()
+        self.test_set = test_dataset.batch(32)
+        
         dataset_ytrain = dataset['train'].map(lambda image, label,_: label)
         self.ytrain =  [label.numpy() for label in dataset_ytrain]
-
-        #test_set = dataset['test'].map(lambda image, label, image_name: (image))
-        #test_set = dataset['valid'].map(lambda image, label, image_name: (image))
-        #self.test_images = test_set.batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
-        #self.test_images_list = list(test_set)
-        #self.test_labels= list(dataset['valid'].map(lambda image, label, image_name: (label)).as_numpy_iterator())
-
 
 
     def train_efficientnet_transfer_learning(self, params, input_shape=(512, 512, 3)):
@@ -114,9 +146,9 @@ class ModelTrainer:
         # Add layers on top of base model
         x = base_model.output
         x = GlobalAveragePooling2D()(x)
-        x = Dense(256, activation="relu")(x)
+        x = layers.Dropout(0.5)(x)
+        x = Dense(256, activation="relu",kernel_regularizer=regularizers.l2(l2=0.05))(x)
         x = layers.BatchNormalization()(x)
-        x = layers.Dropout(0.2)(x)
         outputs = Dense(5, activation="softmax")(x)
 
 
@@ -124,38 +156,38 @@ class ModelTrainer:
         for layer in base_model.layers[-5:]:
             layer.trainable = True
 
-        #loss_fn = sparse_categorical_focal_loss(gamma=2, from_logits=True, class_weights = class_weights_v1)
+        loss_fn = sparse_categorical_focal_loss(gamma=2.0, from_logits=True)
 
 
         # Define the model
         model = Model(inputs=base_model.input, outputs=outputs)
 
-        # Compile the model
-        #model.compile(optimizer=Adam(),
-        #            loss=SparseCategoricalCrossentropy(),
-        #            metrics=['accuracy'])
-
         # Use original class distribution as class weights
-        #class_distribution = {3: 0.61, 4: 0.12, 2: 0.11, 1: 0.10, 0: 0.05}
-        #class_weights = {3: 1 / 0.61, 4: 1 / 0.12, 2: 1 / 0.11, 1: 1 / 0.10, 0: 1 / 0.05}
         class_weights = compute_weights(self.ytrain)
         print(class_weights)
 
         # Define the callback
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', 
+        reduce_lr = ReduceLROnPlateau(monitor='val_accuracy', 
                                     factor=0.1, 
-                                    patience=5, 
-                                    min_lr=0.0001)
-
-        optimizer = Adam(learning_rate=0.01) 
+                                    patience=4, 
+                                    min_delta=0.008,
+                                    min_lr=0.0001) 
+                                    
+        # Define EarlyStopping callback for early stopping
+        early_stopping = EarlyStopping(
+            monitor='val_accuracy',
+            patience=10,  
+            restore_best_weights=True
+        )
+                
 
         # Compile the model
         model.compile(optimizer=Adam(),
                     loss=SparseCategoricalCrossentropy(),
                     metrics=['accuracy'])
-
+        
         # Train the model 
-        historic_data = model.fit(self.train_set, validation_data = self.valid_set,class_weight=class_weights, **params) #callbacks=[reduce_lr]
+        historic_data = model.fit(self.train_set, validation_data = self.valid_set, **params,callbacks=[reduce_lr, early_stopping],class_weight = class_weights) 
 
         return historic_data,model
     
@@ -194,7 +226,7 @@ class ModelTrainer:
         # Create a heatmap for the confusion matrix
         plt.figure(figsize=(6, 4))
         sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', 
-                    xticklabels=self.class_names, yticklabels=self.class_names)
+                    xticklabels=self.class_names, yticklabels=self.class_names,annot_kws={"size": 12})
 
         plt.title('Confusion Matrix')
         plt.xlabel('Predicted label')
@@ -202,6 +234,8 @@ class ModelTrainer:
 
         # Define the path where you want to save the plot
         folder_path = "./figures"
+        
+        plt.tight_layout()
 
         # Save plot in the figures folder
         plt.savefig(f"{folder_path}/{filename}.png")
@@ -216,26 +250,30 @@ def plot_accuracy_epochs(history,metric, filename:str):
 
     Arguments:
         history: history object from model training
+        metric: metric to plot (accuracy or loss)
         filename (str) : specify the file name
 
     Returns:
     """
     
-    plt.figure(figsize=(20,5))
+    plt.figure(figsize=(10,5))
 
     # Create a list of the epochs
     epochs = range(1,len(history.history['loss'])+1)
 
     plt.plot(epochs,history.history[metric], label='Training Accuracy',marker='o')
     plt.plot(epochs,history.history['val_'+ metric], label='Validation Accuracy',marker='o')
-    plt.xticks(epochs)
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-    plt.title('Training and Validation Accuracy')
+    plt.xticks(epochs[::2],fontsize=12)
+    plt.yticks(fontsize=12)
+    plt.xlabel('Epochs',fontsize=12)
+    plt.ylabel('Accuracy',fontsize=12)
+    plt.title('Training and Validation Accuracy',fontsize=12)
     plt.legend()
 
     # Define the path where you want to save the plot
     folder_path = "./figures"
+    
+    plt.tight_layout()
 
     # Save plot in the figures folder
     plt.savefig(f"{folder_path}/{filename}.png")
@@ -244,6 +282,17 @@ def plot_accuracy_epochs(history,metric, filename:str):
     plt.close()
 
 def prediction(data, model):
+
+    """
+    Makes predictions using a given model on a dataset.
+
+    Parameters:
+        data (tf.data.Dataset): Dataset containing images and labels.
+        model (tf.keras.Model): Model used for making predictions.
+
+    Returns:
+        tuple: A tuple containing lists of predicted labels, true labels, and images.
+    """
 
     true_labels, predicted_labels = [], []
     images = []  # List to store images
@@ -263,7 +312,16 @@ def prediction(data, model):
     return predicted_labels,true_labels,images
 
 def misclassified_samples(predicted_labels,true_labels,images,filename):
+    """
+    Visualizes misclassified samples.
 
+    Arguments:
+        predicted_labels (list): List of predicted labels.
+        true_labels (list): List of true labels.
+        images (numpy.ndarray): Array of images.
+        filename (str): Filename for saving the plot.
+     """
+    
     num_samples = 6
     # Find misclassified indexes
     misclassified_indexes = np.where(np.array(predicted_labels) != np.array(true_labels))[0]
@@ -302,6 +360,8 @@ def misclassified_samples(predicted_labels,true_labels,images,filename):
     
     # Define the path where you want to save the plot
     folder_path = "./figures"
+    
+    plt.tight_layout()
 
     # Save plot in the figures folder
     plt.savefig(f"{folder_path}/misclassification_{filename}.png")
@@ -310,6 +370,15 @@ def misclassified_samples(predicted_labels,true_labels,images,filename):
     plt.close()
 
 def compute_weights(y_train):
+    """
+    Computes class weights for imbalanced datasets.
+
+    Parameters:
+        y_train (array-like): Array-like object containing true labels.
+
+    Returns:
+        dict: A dictionary containing class weights.
+     """
 
     #y_train = list(dataset['train'].map(lambda image, label, _: (label)))
     class_weights = compute_class_weight(

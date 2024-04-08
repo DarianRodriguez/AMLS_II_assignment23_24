@@ -36,7 +36,7 @@ abbrev_labels = data_loader.load_label_dictionary()
 preprocessor = Preprocessing(dataset)
 
 # Preprocess steps
-target_size = (512, 512) # original 512x 512
+target_size = (512, 512) 
 preprocessor.resize_dataset(target_size)
 #preprocessor.normalize_data()
 
@@ -53,11 +53,11 @@ datasets = {
 # ======================================================================================================================
 # Models Training
 
-trainer = ModelTrainer(batch_size=32, num_classes=5, dataset = datasets, labels = abbrev_labels)
+trainer = ModelTrainer(batch_size=64, num_classes=5, dataset = datasets, labels = abbrev_labels)
 
 # Dictionary containing model fit parameters
 params = {
-    'epochs': 20,
+    'epochs': 40,
     'verbose': 1
 }
 
@@ -67,47 +67,11 @@ plot_accuracy_epochs(historic_data,'accuracy',"EfficientNetB3 learning")
 
 # Predict
 print("Prediction")
-predicted_labels,true_labels,images = prediction(trainer.valid_set,model)
+predicted_labels,true_labels,images = prediction(trainer.test_set,model)
 
 # Report Results
 print("Report")
 trainer.report_multi_results(predicted_labels,true_labels,"EfficientNet Report")
 
-
-# Evaluate model on validation set
-#loss, accuracy = model.evaluate(trainer.valid_set)
-#print("Validation Loss:", loss)
-#print("Validation Accuracy:", accuracy)
-
 # Plot some misclassified samples for error analysis
 misclassified_samples(predicted_labels,true_labels,images,"B3")
-
-
-
-#data_train, data_val, data_test = data_preprocessing(args...)
-# ======================================================================================================================
-# Task A
-#model_A = A(args...)                 # Build model object.
-#acc_A_train = model_A.train(args...) # Train model based on the training set (you should fine-tune your model based on validation set.)
-#acc_A_test = model_A.test(args...)   # Test model based on the test set.
-#Clean up memory/GPU etc...             # Some code to free memory if necessary.
-
-
-# ======================================================================================================================
-# Task B
-#model_B = B(args...)
-#acc_B_train = model_B.train(args...)
-#acc_B_test = model_B.test(args...)
-#Clean up memory/GPU etc...
-
-
-
-
-# ======================================================================================================================
-## Print out your results with following format:
-#print('TA:{},{};TB:{},{};'.format(acc_A_train, acc_A_test,
-#                                                        acc_B_train, acc_B_test))
-
-# If you are not able to finish a task, fill the corresponding variable with 'TBD'. For example:
-# acc_A_train = 'TBD'
-# acc_B_test = 'TBD'

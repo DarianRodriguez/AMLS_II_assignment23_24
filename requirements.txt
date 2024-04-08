@@ -7,3 +7,4 @@ scikit-learn
 seaborn
 tensorflow
 keras
+opencv-python

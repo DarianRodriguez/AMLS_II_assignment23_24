@@ -100,12 +100,12 @@ class TFRecordDatasetLoader:
         value_labels = [abbreviations[str(value)] for value in label_counts.index]
 
         # Create bar plot
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig, ax = plt.subplots(figsize=(8, 5))
         label_counts.plot(kind='bar', ax=ax)
         ax.set_xlabel('')
         ax.set_ylabel('Image Count')
         ax.set_title('Class Distribution')
-        ax.set_xticklabels(value_labels, rotation=0)
+        ax.set_xticklabels(value_labels, rotation=0,fontsize=12)
         
         # Add percentage labels on top of each bar
         total = label_counts.sum()
